@@ -3,7 +3,10 @@
     "allow": [
       "Bash(python -c \"import py_compile; py_compile.compile\\('3_stitch_3d_from_poses.py', doraise=True\\); print\\('Syntax OK'\\)\")",
       "Bash(python -c ' *)",
-      "Bash(python 3_stitch_3d_from_poses.py)"
+      "Bash(python 3_stitch_3d_from_poses.py)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('2_stitch_from_poses.py', doraise=True\\); print\\('Syntax OK'\\)\")",
+      "Bash(python 2_stitch_from_poses.py)",
+      "Bash(python -c \"with open\\('2_stitch_from_poses.py','r'\\) as f: c=f.read\\(\\); print\\(c.count\\(chr\\(9989\\)\\), c.count\\(chr\\(10060\\)\\), c.count\\(chr\\(65039\\)\\)\\)\")"
     ]
   }
 }

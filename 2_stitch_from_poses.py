@@ -139,35 +139,120 @@ def run_global_stitcher(all_images, all_poses, output_path):
         if shrink_rgt: x2 -= 1
 
     cropped_final = final_canvas[y1:y2, x1:x2]
-    
+
+    # Save raw version before black/white fill (for defect detection)
+    cv2.imwrite(output_path.replace('.jpg', '_raw.jpg'), cropped_final)
+
     if cropped_final.size > 0:
         # ==========================================
-        # [新增] 全黑和全白区域的全局均值填充逻辑
+        # black/white fill
         # ==========================================
         # 识别纯黑像素 (RGB全部低于15) 和纯白像素 (RGB全部高于240)
         is_black = np.all(cropped_final < 15, axis=2)
         is_white = np.all(cropped_final > 240, axis=2)
-        
+
         # 找到属于正常纹理的像素集
         valid_pixels_mask = ~(is_black | is_white)
-        
+
         # 只要画面中还有正常颜色，就计算它们的全局平均 BGR 值
         if np.any(valid_pixels_mask):
             global_avg_color = np.mean(cropped_final[valid_pixels_mask], axis=0)
-            
+
             # 将算出的平均色直接像油漆桶一样填入纯黑和纯白的区域
             cropped_final[is_black] = global_avg_color
             cropped_final[is_white] = global_avg_color
         # ==========================================
 
         cv2.imwrite(output_path, cropped_final)
-        print(f"✅ 拼接、裁剪及黑白块均值填充完成！最终图像 ({cropped_final.shape[1]}x{cropped_final.shape[0]}) 已保存至: {output_path}")
+        print(f" 拼接、裁剪及黑白块均值填充完成！最终图像 ({cropped_final.shape[1]}x{cropped_final.shape[0]}) 已保存至: {output_path}")
+
     else:
-        print("❌ 警告：裁剪过度导致图像为空。退回保存完整画布。")
+        print(" 警告：裁剪过度导致图像为空。退回保存完整画布。")
         cv2.imwrite(output_path, final_canvas)
 
 # ==========================================
-# 3. 主控调度 (保留中心偏移逻辑)
+# 3. Canny 缺陷检测（参考 C# 代码移植）
+# ==========================================
+def detect_defects_canny(img, output_path, blue_thresh=40, gain=1):
+    b = img[:, :, 0].astype(np.float32)
+    rg_max = np.maximum(img[:, :, 1], img[:, :, 2]).astype(np.float32)
+    blue_score = np.clip(b - rg_max, 0, 255)
+
+    enhanced = blue_score.copy()
+    enhanced[enhanced < blue_thresh] = 0
+    enhanced = np.clip(enhanced * gain, 0, 255).astype(np.uint8)
+
+    prep_path = output_path.replace('_defects.jpg', '_enhanced.jpg')
+    cv2.imwrite(prep_path, enhanced)
+
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 1.5)
+
+    low_thresh = 5
+    high_thresh = 20
+    edges = cv2.Canny(blurred, low_thresh, high_thresh)
+
+    debug_path = output_path.replace('.jpg', '_edges.jpg')
+    cv2.imwrite(debug_path, edges)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    dilated = cv2.dilate(edges, kernel)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    result = img.copy()
+    defect_count = 0
+    h, w = img.shape[:2]
+
+    for i, cnt in enumerate(contours):
+        area = cv2.contourArea(cnt)
+        length = cv2.arcLength(cnt, True)
+        if length < 1:
+            continue
+        if area < length * 1.5:
+            continue
+        if area < 50 or area > h * w * 0.4:
+            continue
+
+        rect = cv2.minAreaRect(cnt)
+        box = cv2.boxPoints(rect)
+        box = np.int32(box)
+
+        xs = box[:, 0]
+        ys = box[:, 1]
+        min_x = max(0, int(xs.min()) - 1)
+        max_x = min(w, int(xs.max()) + 2)
+        min_y = max(0, int(ys.min()) - 1)
+        max_y = min(h, int(ys.max()) + 2)
+
+        defect_count += 1
+
+        rect_w = rect[1][0]
+        rect_h = rect[1][1]
+        defect_size = max(rect_w, rect_h)
+        if defect_size < 20:
+            label = "small"
+            color = (0, 255, 255)
+        elif defect_size < 50:
+            label = "medium"
+            color = (0, 165, 255)
+        else:
+            label = "large"
+            color = (0, 0, 255)
+
+        cv2.drawContours(result, [box], 0, color, 2)
+        cx, cy = int(rect[0][0]), int(rect[0][1])
+        cv2.putText(result, f"#{defect_count} {label}", (cx - 20, cy - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        cv2.putText(result, f"{defect_size:.0f}mm", (cx - 20, cy + 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        print(f"  Defect #{defect_count}: center=({cx},{cy}) size={defect_size:.0f}px area={area:.0f} class={label}")
+
+    cv2.imwrite(output_path, result)
+    print(f"  Canny done, {defect_count} defects, saved: {output_path}")
+
+# ==========================================
+# 4. 主控调度 (保留中心偏移逻辑)
 # ==========================================
 def main():
     input_dir = "./object"   
@@ -183,8 +268,21 @@ def main():
     split_configs = pose_data['split_configs']
     global_poses = pose_data['poses']
 
-    total_images = len(split_configs)
-    num_main_strips = total_images - 2 
+    files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg'))]
+    files.sort(key=lambda f: int(re.findall(r'\d+', f)[0]) if re.findall(r'\d+', f) else 0)
+    n = len(files)
+
+    total_images_orig = len(split_configs)
+    if n != total_images_orig:
+        print(f"  提示: 配置 {total_images_orig} 组位姿, 实际 {n} 个文件")
+        effective_configs = split_configs[:n]
+        used_pose_count = sum(effective_configs)
+    else:
+        effective_configs = split_configs
+        used_pose_count = len(global_poses)
+
+    total_images = len(split_configs)  # 保留原始组数用于偏移判断
+    num_main_strips = total_images - 2
     
     pose_idx = 0
     for i, num_splits in enumerate(split_configs):
@@ -201,15 +299,8 @@ def main():
                 global_poses[pose_idx]['x'] += 170.0
                 pose_idx += 1
 
-    files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg'))]
-    files.sort(key=lambda f: int(re.findall(r'\d+', f)[0]) if re.findall(r'\d+', f) else 0)
-    n = len(files)
-
-    if n != pose_data['total_images']:
-        print("警告：当前目录的图片数量与 JSON 记录不匹配！")
-
     global_images = []
-    print(f"启动拼接流。共加载 {n} 张源图，执行高级渲染...")
+    print(f"启动拼接流。共加载 {n} 个文件, {len(split_configs)} 组位姿...")
 
     for i, filename in enumerate(files):
         img = cv2.imread(os.path.join(input_dir, filename), cv2.IMREAD_UNCHANGED)
@@ -218,11 +309,16 @@ def main():
         slices = preprocess_and_split(img, num_poses_for_this_img)
         global_images.extend(slices)
 
-    if len(global_images) != len(global_poses):
-        print("严重错误：切片总数与位姿总数不匹配！")
+    if len(global_images) != used_pose_count:
+        print(f"严重错误：切片 {len(global_images)}  vs 位姿 {used_pose_count}")
         return
 
-    run_global_stitcher(global_images, global_poses, "perfect_aligned_c_scan.jpg")
+    run_global_stitcher(global_images, global_poses[:used_pose_count], "perfect_aligned_c_scan.jpg")
+
+    # Canny defect detection (independent post-process, does not modify original)
+    stitched = cv2.imread("perfect_aligned_c_scan_raw.jpg")
+    if stitched is not None:
+        detect_defects_canny(stitched, "perfect_aligned_c_scan_defects.jpg", blue_thresh=40, gain=1)
 
 if __name__ == "__main__":
     main()
