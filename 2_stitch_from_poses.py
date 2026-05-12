@@ -190,7 +190,7 @@ def main():
     for i, num_splits in enumerate(split_configs):
         if i < num_main_strips:
             for _ in range(num_splits):
-                global_poses[pose_idx]['y'] += 140.0
+                global_poses[pose_idx]['y'] += 74.0
                 pose_idx += 1
         elif i == total_images - 2:
             for _ in range(num_splits):

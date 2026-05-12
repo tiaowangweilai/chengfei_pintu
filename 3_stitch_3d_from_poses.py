@@ -72,12 +72,12 @@ def load_volume_from_txt(filepath, prethreshold=2.0):
     return volume
 
 # ==========================================
-# 2. 沿步进轴切分 (核心修复：精准动态切除尾部废数据)
+# 2. 沿步进轴切分：有效数据不足时自动复制填充（避免空块）
 # ==========================================
 def split_volume(volume, num_poses):
     """
-    直击根源：先剔除 txt 尾部的传感器空跑/补零数据，再进行等分！
-    这确保了有效数据会被正确地分配到所有的位姿上，消除中间的断层间隙。
+    先剔除尾部的传感器空跑/补零数据，再等分。
+    若有效步进层数 < num_poses，自动复制已有数据填满，确保每块都有内容。
     """
     # 1. 计算每一层的绝对值总和，识别出"全零"的空扫描区域
     layer_sums = np.sum(np.abs(volume), axis=(1, 2))
@@ -86,27 +86,28 @@ def split_volume(volume, num_poses):
     valid_indices = np.where(layer_sums > 1e-3)[0]
 
     if len(valid_indices) > 0:
-        crop_bottom_idx = valid_indices[-1] + 1  # 真实数据的最后一行
+        crop_bottom_idx = valid_indices[-1] + 1
     else:
         crop_bottom_idx = volume.shape[0]
 
     cropped_vol = volume[:crop_bottom_idx, ...]
     new_height = cropped_vol.shape[0]
 
-    # 3. 计算每份的理想高度，并向上取整
-    sub_height = math.ceil(new_height / num_poses)
+    if new_height == 0:
+        return [np.zeros((1, volume.shape[1], volume.shape[2]), dtype=volume.dtype) for _ in range(num_poses)]
 
-    # 4. 补齐到能被完全等分的大小 (防止最后一份形状残缺报错)
-    pad_height = (sub_height * num_poses) - new_height
-    if pad_height > 0:
-        pad_shape = list(cropped_vol.shape)
-        pad_shape[0] = pad_height
-        padding = np.zeros(pad_shape, dtype=cropped_vol.dtype)
+    # 3. 每份高度 + 有效层均值填充不足部分（比 tile 复制更平滑，同样快）
+    sub_height = math.ceil(new_height / num_poses)
+    target = sub_height * num_poses
+    if new_height < target:
+        mean_layer = cropped_vol.mean(axis=0, keepdims=True)  # (1, w, d)
+        n_pad = target - new_height
+        padding = np.repeat(mean_layer, n_pad, axis=0)
         padded_vol = np.vstack((cropped_vol, padding))
     else:
         padded_vol = cropped_vol
 
-    # 5. 执行物理等分
+    # 4. 执行物理等分
     sub_volumes = []
     for i in range(num_poses):
         start_y = i * sub_height
@@ -438,7 +439,7 @@ def main():
 
     defect_threshold = 2.0
     depth_range = (20, 310)
-    physical_depth_mm = 20.0   # 声程方向物理厚度 (mm)，参照 tradition3d_BEV.PHYSICAL_DEPTH_Z
+    physical_depth_mm = 200.0   # 声程方向物理厚度 (mm)，参照 tradition3d_BEV.PHYSICAL_DEPTH_Z
     fill_factor = 1            # 亚像素填充倍数 (1=不填充，大幅降数据量)
     voxel_size = 5.0           # 体素网格降采样 (mm, 0=跳过)，参照 tradition3d_BEV.py 的 strided 策略
     vol_stride_scan = True     # 类似 BEV 对体数据做 strided 降采样 (step_x = max(1, nx//80))
@@ -462,7 +463,7 @@ def main():
     for i, num_splits in enumerate(split_configs):
         if i < num_main_strips:
             for _ in range(num_splits):
-                global_poses[pose_idx]['y'] += 140.0
+                global_poses[pose_idx]['y'] += 74.0
                 pose_idx += 1
         elif i == total_images - 2:
             for _ in range(num_splits):
