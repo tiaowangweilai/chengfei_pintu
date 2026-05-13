@@ -125,10 +125,10 @@ def run_global_stitcher(all_images, all_poses, output_path):
         left_edge = closed_mask[y1:y2, x1]
         right_edge = closed_mask[y1:y2, x2-1]
 
-        shrink_top = np.any(top_edge == 0)
-        shrink_bot = np.any(bottom_edge == 0)
-        shrink_lft = np.any(left_edge == 0)
-        shrink_rgt = np.any(right_edge == 0)
+        shrink_top = np.sum(top_edge == 0) > len(top_edge) * 0.05
+        shrink_bot = np.sum(bottom_edge == 0) > len(bottom_edge) * 0.05
+        shrink_lft = np.sum(left_edge == 0) > len(left_edge) * 0.05
+        shrink_rgt = np.sum(right_edge == 0) > len(right_edge) * 0.05
 
         if not (shrink_top or shrink_bot or shrink_lft or shrink_rgt):
             break 
@@ -137,6 +137,10 @@ def run_global_stitcher(all_images, all_poses, output_path):
         if shrink_bot: y2 -= 1
         if shrink_lft: x1 += 1
         if shrink_rgt: x2 -= 1
+
+    # 保存裁剪信息供 4_extract_defect_3d.py 使用
+    with open("_crop_bounds.json", "w") as f:
+        json.dump({"x1": x1, "y1": y1, "x2": x2, "y2": y2}, f)
 
     cropped_final = final_canvas[y1:y2, x1:x2]
 
